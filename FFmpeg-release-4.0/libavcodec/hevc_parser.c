@@ -57,22 +57,27 @@ static int hevc_parse_slice_header(AVCodecParserContext *s, H2645NAL *nal,
 {
     HEVCParserContext *ctx = s->priv_data;
     HEVCParamSets *ps = &ctx->ps;
-    HEVCSEI *sei = &ctx->sei;
+    HEVCSEI *sei = &ctx->sei;//supplemental enhancement information 
     SliceHeader *sh = &ctx->sh;
     GetBitContext *gb = &nal->gb;
     const HEVCWindow *ow;
     int i, num = 0, den = 0;
 
     sh->first_slice_in_pic_flag = get_bits1(gb);
+    //按照解码顺序，当前SS是否为第一个SS(Slice Segment)
+
     s->picture_structure = sei->picture_timing.picture_struct;
     s->field_order = sei->picture_timing.picture_struct;
 
     if (IS_IRAP_NAL(nal)) {
+        //IRAP, Intra Random Access Point, 随机介入点
         s->key_frame = 1;
+        //设置关键帧
         sh->no_output_of_prior_pics_flag = get_bits1(gb);
     }
 
     sh->pps_id = get_ue_golomb(gb);
+    //当前slice引用的PPS的ID号
     if (sh->pps_id >= HEVC_MAX_PPS_COUNT || !ps->pps_list[sh->pps_id]) {
         av_log(avctx, AV_LOG_ERROR, "PPS id out of range: %d\n", sh->pps_id);
         return AVERROR_INVALIDDATA;
@@ -109,16 +114,19 @@ static int hevc_parse_slice_header(AVCodecParserContext *s, H2645NAL *nal,
         av_reduce(&avctx->framerate.den, &avctx->framerate.num,
                   num, den, 1 << 30);
 
+    //当前的slice是不是第一个slice
     if (!sh->first_slice_in_pic_flag) {
         int slice_address_length;
 
         if (ps->pps->dependent_slice_segments_enabled_flag)
+            //当前SS是否依赖SS
             sh->dependent_slice_segment_flag = get_bits1(gb);
         else
             sh->dependent_slice_segment_flag = 0;
 
         slice_address_length = av_ceil_log2_c(ps->sps->ctb_width *
                                               ps->sps->ctb_height);
+        //当前SS中第一个CTU的地址
         sh->slice_segment_addr = get_bitsz(gb, slice_address_length);
         if (sh->slice_segment_addr >= ps->sps->ctb_width * ps->sps->ctb_height) {
             av_log(avctx, AV_LOG_ERROR, "Invalid slice segment address: %u.\n",
@@ -126,13 +134,18 @@ static int hevc_parse_slice_header(AVCodecParserContext *s, H2645NAL *nal,
             return AVERROR_INVALIDDATA;
         }
     } else
-        sh->dependent_slice_segment_flag = 0;
+        sh->dependent_slice_segment_flag = 0;//独立SS
 
-    if (sh->dependent_slice_segment_flag)
+    if (sh->dependent_slice_segment_flag)//依赖SS
         return 0; /* break; */
 
     for (i = 0; i < ps->pps->num_extra_slice_header_bits; i++)
         skip_bits(gb, 1); // slice_reserved_undetermined_flag[]
+    
+    //slice type定义：
+    //  0: B Slice
+    //  1: P Slice
+    //  2: I Slice
 
     sh->slice_type = get_ue_golomb(gb);
     if (!(sh->slice_type == HEVC_SLICE_I || sh->slice_type == HEVC_SLICE_P ||
@@ -195,8 +208,25 @@ static int parse_nal_units(AVCodecParserContext *s, const uint8_t *buf,
 
     ret = ff_h2645_packet_split(&ctx->pkt, buf, buf_size, avctx, ctx->is_avc,
                                 ctx->nal_length_size, AV_CODEC_ID_HEVC, 1);
+    //Split an input packet into NAL units.
+
     if (ret < 0)
         return ret;
+
+        /*
+         * 几种NALU之间的关系
+         *                           +--SS1
+         *                           |
+         *                 +--PPS1<--+
+         *                 |         |
+         *       +--SPS1<--+         +--SS2
+         *       |         |
+         * VPS<--+         +--PPS2
+         *       |
+         *       +--SPS2
+         *
+         */
+    //解析不同种类的NALU
 
     for (i = 0; i < ctx->pkt.nb_nals; i++) {
         H2645NAL *nal = &ctx->pkt.nals[i];
@@ -204,16 +234,21 @@ static int parse_nal_units(AVCodecParserContext *s, const uint8_t *buf,
 
         switch (nal->type) {
         case HEVC_NAL_VPS:
+        //解析VPS
+        //VPS主要传输视频分级信息，有利于兼容可分级视频编码以及多视点视频编码
             ff_hevc_decode_nal_vps(gb, avctx, ps);
             break;
         case HEVC_NAL_SPS:
+        //解析SPS
             ff_hevc_decode_nal_sps(gb, avctx, ps, 1);
             break;
         case HEVC_NAL_PPS:
+        //解析PPS
             ff_hevc_decode_nal_pps(gb, avctx, ps);
             break;
         case HEVC_NAL_SEI_PREFIX:
         case HEVC_NAL_SEI_SUFFIX:
+        //解析SEI
             ff_hevc_decode_nal_sei(gb, avctx, sei, ps, nal->type);
             break;
         case HEVC_NAL_TRAIL_N:
@@ -256,13 +291,36 @@ static int hevc_find_frame_end(AVCodecParserContext *s, const uint8_t *buf,
 
     for (i = 0; i < buf_size; i++) {
         int nut;
+        //一个一个字节处理
 
         pc->state64 = (pc->state64 << 8) | buf[i];
+        //   uint64_t state64; < contains the last 8 bytes in MSB order
 
-        if (((pc->state64 >> 3 * 8) & 0xFFFFFF) != START_CODE)
+        if (((pc->state64 >> 3 * 8) & 0xFFFFFF) != START_CODE)//#define START_CODE 0x000001 ///< start_code_prefix_one_3bytes
             continue;
+        //找到起始码后
+        /*
+          此时state64内容如下：
+                        |      Start Code    | NALU Header |
+          |------|------|------|------|------|------|------|------|
+         
+                        |  buf |  buf |  buf |  buf |  buf | buf  |
+                        | [t-5]| [t-4]| [t-3]| [t-2]| [t-1]|  [t] |
+         
+          Start Code:
+          0x000001
+         
+          NALU Header:
+          forbidden_zero_bit: 1bit。取值0。
+          nal_unit_type: 6 bit。NALU类型。
+          nuh_layer_id: 6 bit。目前取值为0（保留以后使用）.
+          nuh_temporal_id_plus1: 3 bit。减1后为NALU时域层标识号TemporalID。
+         */
 
         nut = (pc->state64 >> 2 * 8 + 1) & 0x3F;
+        //state64右移(16+1)bit,然后与(00111111)
+        //即得到了nal_unit_type
+
         // Beginning of access unit
         if ((nut >= HEVC_NAL_VPS && nut <= HEVC_NAL_EOB_NUT) || nut == HEVC_NAL_SEI_PREFIX ||
             (nut >= 41 && nut <= 44) || (nut >= 48 && nut <= 55)) {
