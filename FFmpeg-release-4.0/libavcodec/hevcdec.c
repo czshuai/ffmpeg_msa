@@ -2087,12 +2087,14 @@ static int hls_coding_unit(HEVCContext *s, int x0, int y0, int log2_cb_size)
     int log2_min_cb_size = s->ps.sps->log2_min_cb_size;
     int length           = cb_size >> log2_min_cb_size;
     int min_cb_width     = s->ps.sps->min_cb_width;
+    //以最小的CB为单元（ 例如4x4 ）的时候，当前CB的位置 -- x坐标和y坐标
     int x_cb             = x0 >> log2_min_cb_size;
     int y_cb             = y0 >> log2_min_cb_size;
     int idx              = log2_cb_size - 2;
     int qp_block_mask    = (1<<(s->ps.sps->log2_ctb_size - s->ps.pps->diff_cu_qp_delta_depth)) - 1;
     int x, y, ret;
 
+    //设置CU的属性值
     lc->cu.x                = x0;
     lc->cu.y                = y0;
     lc->cu.pred_mode        = MODE_INTRA;
@@ -2100,6 +2102,7 @@ static int hls_coding_unit(HEVCContext *s, int x0, int y0, int log2_cb_size)
     lc->cu.intra_split_flag = 0;
 
     SAMPLE_CTB(s->skip_flag, x_cb, y_cb) = 0;
+
     for (x = 0; x < 4; x++)
         lc->pu.intra_pred_mode[x] = 1;
     if (s->ps.pps->transquant_bypass_enable_flag) {
@@ -2110,8 +2113,9 @@ static int hls_coding_unit(HEVCContext *s, int x0, int y0, int log2_cb_size)
         lc->cu.cu_transquant_bypass_flag = 0;
 
     if (s->sh.slice_type != HEVC_SLICE_I) {
+        //Skip类型
         uint8_t skip_flag = ff_hevc_skip_flag_decode(s, x0, y0, x_cb, y_cb);
-
+        //设置到skip_flag缓存中
         x = y_cb * min_cb_width + x_cb;
         for (y = 0; y < length; y++) {
             memset(&s->skip_flag[x], skip_flag, length);
@@ -2135,20 +2139,27 @@ static int hls_coding_unit(HEVCContext *s, int x0, int y0, int log2_cb_size)
     } else {
         int pcm_flag = 0;
 
+        //读取预测模式(非 I Slice)
         if (s->sh.slice_type != HEVC_SLICE_I)
             lc->cu.pred_mode = ff_hevc_pred_mode_decode(s);
+
+        //不是帧内预测模式的时候
+        //或者已经是最小CB的时候
         if (lc->cu.pred_mode != MODE_INTRA ||
             log2_cb_size == s->ps.sps->log2_min_cb_size) {
+            //读取CU分割模式
             lc->cu.part_mode        = ff_hevc_part_mode_decode(s, log2_cb_size);
             lc->cu.intra_split_flag = lc->cu.part_mode == PART_NxN &&
                                       lc->cu.pred_mode == MODE_INTRA;
         }
 
         if (lc->cu.pred_mode == MODE_INTRA) {
+            //帧内预测模式
             if (lc->cu.part_mode == PART_2Nx2N && s->ps.sps->pcm_enabled_flag &&
                 log2_cb_size >= s->ps.sps->pcm.log2_min_pcm_cb_size &&
                 log2_cb_size <= s->ps.sps->pcm.log2_max_pcm_cb_size) {
                 pcm_flag = ff_hevc_pcm_flag_decode(s);
+            //PCM方式编码
             }
             if (pcm_flag) {
                 intra_prediction_unit_default_value(s, x0, y0, log2_cb_size);
@@ -2159,39 +2170,176 @@ static int hls_coding_unit(HEVCContext *s, int x0, int y0, int log2_cb_size)
                 if (ret < 0)
                     return ret;
             } else {
+                //获取帧内预测模式
                 intra_prediction_unit(s, x0, y0, log2_cb_size);
             }
         } else {
+            //帧间预测模式
             intra_prediction_unit_default_value(s, x0, y0, log2_cb_size);
+
+            //帧间模式一共有8种划分模式
             switch (lc->cu.part_mode) {
             case PART_2Nx2N:
                 hls_prediction_unit(s, x0, y0, cb_size, cb_size, log2_cb_size, 0, idx);
+
+                /*
+                 * PART_2Nx2N:
+                 * +--------+--------+
+                 * |                 |
+                 * |                 |
+                 * |                 |
+                 * +        +        +
+                 * |                 |
+                 * |                 |
+                 * |                 |
+                 * +--------+--------+
+                 */
+                //处理PU单元 - 运动补偿
+
                 break;
             case PART_2NxN:
+
+                /*
+                 * PART_2NxN:
+                 * +--------+--------+
+                 * |                 |
+                 * |                 |
+                 * |                 |
+                 * +--------+--------+
+                 * |                 |
+                 * |                 |
+                 * |                 |
+                 * +--------+--------+
+                 *
+                 */
+                /*
+                 * hls_prediction_unit()参数：
+                 * x0 : PU左上角x坐标
+                 * y0 : PU左上角y坐标
+                 * nPbW : PU宽度
+                 * nPbH : PU高度
+                 * log2_cb_size : CB大小取log2()的值
+                 * partIdx : PU的索引号-分成4个块的时候取0-3，分成两个块的时候取0和1
+                 */
+
+                //上
                 hls_prediction_unit(s, x0, y0,               cb_size, cb_size / 2, log2_cb_size, 0, idx);
+                //下
                 hls_prediction_unit(s, x0, y0 + cb_size / 2, cb_size, cb_size / 2, log2_cb_size, 1, idx);
                 break;
             case PART_Nx2N:
+
+                /*
+                 * PART_Nx2N:
+                 * +--------+--------+
+                 * |        |        |
+                 * |        |        |
+                 * |        |        |
+                 * +        +        +
+                 * |        |        |
+                 * |        |        |
+                 * |        |        |
+                 * +--------+--------+
+                 *
+                 */
+
+                //左
                 hls_prediction_unit(s, x0,               y0, cb_size / 2, cb_size, log2_cb_size, 0, idx - 1);
+                //右
                 hls_prediction_unit(s, x0 + cb_size / 2, y0, cb_size / 2, cb_size, log2_cb_size, 1, idx - 1);
                 break;
             case PART_2NxnU:
+
+                /*
+                 * PART_2NxnU (Upper) :
+                 * +--------+--------+
+                 * |                 |
+                 * +--------+--------+
+                 * |                 |
+                 * +        +        +
+                 * |                 |
+                 * |                 |
+                 * |                 |
+                 * +--------+--------+
+                 *
+                 */
+
                 hls_prediction_unit(s, x0, y0,               cb_size, cb_size     / 4, log2_cb_size, 0, idx);
                 hls_prediction_unit(s, x0, y0 + cb_size / 4, cb_size, cb_size * 3 / 4, log2_cb_size, 1, idx);
                 break;
             case PART_2NxnD:
+
+                /*
+                 * PART_2NxnD (Down) :
+                 * +--------+--------+
+                 * |                 |
+                 * |                 |
+                 * |                 |
+                 * +        +        +
+                 * |                 |
+                 * +--------+--------+
+                 * |                 |
+                 * +--------+--------+
+                 *
+                 */
+
                 hls_prediction_unit(s, x0, y0,                   cb_size, cb_size * 3 / 4, log2_cb_size, 0, idx);
                 hls_prediction_unit(s, x0, y0 + cb_size * 3 / 4, cb_size, cb_size     / 4, log2_cb_size, 1, idx);
                 break;
             case PART_nLx2N:
+
+                /*
+                 * PART_nLx2N (Left):
+                 * +----+---+--------+
+                 * |    |            |
+                 * |    |            |
+                 * |    |            |
+                 * +    +   +        +
+                 * |    |            |
+                 * |    |            |
+                 * |    |            |
+                 * +----+---+--------+
+                 *
+                 */
+
                 hls_prediction_unit(s, x0,               y0, cb_size     / 4, cb_size, log2_cb_size, 0, idx - 2);
                 hls_prediction_unit(s, x0 + cb_size / 4, y0, cb_size * 3 / 4, cb_size, log2_cb_size, 1, idx - 2);
                 break;
             case PART_nRx2N:
+
+                /*
+                 * PART_nRx2N (Right):
+                 * +--------+---+----+
+                 * |            |    |
+                 * |            |    |
+                 * |            |    |
+                 * +        +   +    +
+                 * |            |    |
+                 * |            |    |
+                 * |            |    |
+                 * +--------+---+----+
+                 *
+                 */
+
                 hls_prediction_unit(s, x0,                   y0, cb_size * 3 / 4, cb_size, log2_cb_size, 0, idx - 2);
                 hls_prediction_unit(s, x0 + cb_size * 3 / 4, y0, cb_size     / 4, cb_size, log2_cb_size, 1, idx - 2);
                 break;
             case PART_NxN:
+
+                /*
+                 * PART_NxN:
+                 * +--------+--------+
+                 * |        |        |
+                 * |        |        |
+                 * |        |        |
+                 * +--------+--------+
+                 * |        |        |
+                 * |        |        |
+                 * |        |        |
+                 * +--------+--------+
+                 *
+                 */
+               
                 hls_prediction_unit(s, x0,               y0,               cb_size / 2, cb_size / 2, log2_cb_size, 0, idx - 1);
                 hls_prediction_unit(s, x0 + cb_size / 2, y0,               cb_size / 2, cb_size / 2, log2_cb_size, 1, idx - 1);
                 hls_prediction_unit(s, x0,               y0 + cb_size / 2, cb_size / 2, cb_size / 2, log2_cb_size, 2, idx - 1);
@@ -2212,6 +2360,7 @@ static int hls_coding_unit(HEVCContext *s, int x0, int y0, int log2_cb_size)
                 lc->cu.max_trafo_depth = lc->cu.pred_mode == MODE_INTRA ?
                                          s->ps.sps->max_transform_hierarchy_depth_intra + lc->cu.intra_split_flag :
                                          s->ps.sps->max_transform_hierarchy_depth_inter;
+                //处理TU四叉树
                 ret = hls_transform_tree(s, x0, y0, x0, y0, x0, y0,
                                          log2_cb_size,
                                          log2_cb_size, 0, 0, cbf, cbf);
@@ -2247,10 +2396,13 @@ static int hls_coding_quadtree(HEVCContext *s, int x0, int y0,
                                int log2_cb_size, int cb_depth)
 {
     HEVCLocalContext *lc = s->HEVClc;
+    //CB的大小，split flag=0
+    //log2_cb_size为CB大小取log之后的结果
     const int cb_size    = 1 << log2_cb_size;
     int ret;
     int split_cu;
 
+    //确定CU是否还会划分
     lc->ct_depth = cb_depth;
     if (x0 + cb_size <= s->ps.sps->width  &&
         y0 + cb_size <= s->ps.sps->height &&
@@ -2271,13 +2423,19 @@ static int hls_coding_quadtree(HEVCContext *s, int x0, int y0,
     }
 
     if (split_cu) {
+        //如果CU还可以继续划分，则继续解析划分后的CU
+        //这里是递归调用
         int qp_block_mask = (1<<(s->ps.sps->log2_ctb_size - s->ps.pps->diff_cu_qp_delta_depth)) - 1;
+
+        //CB的大小，split flag=1
         const int cb_size_split = cb_size >> 1;
         const int x1 = x0 + cb_size_split;
         const int y1 = y0 + cb_size_split;
 
         int more_data = 0;
 
+        //CU大小减半，log2_cb_size - 1
+        //深度d加1，cb_depth + 1
         more_data = hls_coding_quadtree(s, x0, y0, log2_cb_size - 1, cb_depth + 1);
         if (more_data < 0)
             return more_data;
@@ -2309,6 +2467,9 @@ static int hls_coding_quadtree(HEVCContext *s, int x0, int y0,
         else
             return 0;
     } else {
+
+        //注意处理的是不可划分的CU单元
+        //处理CU单元 - 真正的解码
         ret = hls_coding_unit(s, x0, y0, log2_cb_size);
         if (ret < 0)
             return ret;
@@ -2380,6 +2541,7 @@ static void hls_decode_neighbour(HEVCContext *s, int x_ctb, int y_ctb,
 static int hls_decode_entry(AVCodecContext *avctxt, void *isFilterThread)
 {
     HEVCContext *s  = avctxt->priv_data;
+    //CTB尺寸
     int ctb_size    = 1 << s->ps.sps->log2_ctb_size;
     int more_data   = 1;
     int x_ctb       = 0;
@@ -2402,24 +2564,40 @@ static int hls_decode_entry(AVCodecContext *avctxt, void *isFilterThread)
 
     while (more_data && ctb_addr_ts < s->ps.sps->ctb_size) {
         int ctb_addr_rs = s->ps.pps->ctb_addr_ts_to_rs[ctb_addr_ts];
-
+        //CTB的位置x和y
         x_ctb = (ctb_addr_rs % ((s->ps.sps->width + ctb_size - 1) >> s->ps.sps->log2_ctb_size)) << s->ps.sps->log2_ctb_size;
         y_ctb = (ctb_addr_rs / ((s->ps.sps->width + ctb_size - 1) >> s->ps.sps->log2_ctb_size)) << s->ps.sps->log2_ctb_size;
+        //初始化周围的参数
         hls_decode_neighbour(s, x_ctb, y_ctb, ctb_addr_ts);
 
+        //初始化CABAC    
         ret = ff_hevc_cabac_init(s, ctb_addr_ts);
         if (ret < 0) {
             s->tab_slice_address[ctb_addr_rs] = -1;
             return ret;
         }
 
+        //样点自适应补偿参数
         hls_sao_param(s, x_ctb >> s->ps.sps->log2_ctb_size, y_ctb >> s->ps.sps->log2_ctb_size);
 
         s->deblock[ctb_addr_rs].beta_offset = s->sh.beta_offset;
         s->deblock[ctb_addr_rs].tc_offset   = s->sh.tc_offset;
         s->filter_slice_edges[ctb_addr_rs]  = s->sh.slice_loop_filter_across_slices_enabled_flag;
 
+        /*
+          解析四叉树结构，并且解码
+
+          hls_coding_quadtree(HEVCContext *s,int x0,int y0,int log2_cb_size,int cb_depth)中：
+          s : HEVCContext上下文结构体
+          x_ctb： CB位置的x坐标
+          y_ctb： CB位置的y坐标
+          log2_cb_size：CB大小取log2之后的值
+          cb_depth：深度
+        */
+
+        //CTB表示编码树块   CTU=Luma CTB + Cb CTB + Cr CTB + Syntax ELement
         more_data = hls_coding_quadtree(s, x_ctb, y_ctb, s->ps.sps->log2_ctb_size, 0);
+        //对CTB解码，其中包括了CU、PU、TU
         if (more_data < 0) {
             s->tab_slice_address[ctb_addr_rs] = -1;
             return more_data;
@@ -2427,7 +2605,9 @@ static int hls_decode_entry(AVCodecContext *avctxt, void *isFilterThread)
 
 
         ctb_addr_ts++;
+        //保存解码信息以供下次使用
         ff_hevc_save_states(s, ctb_addr_ts);
+        //去块效应滤波 包括去块效应滤波和SAO滤波
         ff_hevc_hls_filters(s, x_ctb, y_ctb, ctb_size);
     }
 
@@ -2446,6 +2626,7 @@ static int hls_slice_data(HEVCContext *s)
     arg[0] = 0;
     arg[1] = 1;
 
+    //解码函数入口
     s->avctx->execute(s->avctx, hls_decode_entry, arg, ret , 1, sizeof(int));
     return ret[0];
 }
@@ -2973,6 +3154,7 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
                 goto fail;
         }
 
+        //解码Slice data
         if (s->avctx->hwaccel) {
             ret = s->avctx->hwaccel->decode_slice(s->avctx, nal->raw_data, nal->raw_size);
             if (ret < 0)
@@ -3052,7 +3234,7 @@ static int decode_nal_units(HEVCContext *s, const uint8_t *buf, int length)
             (s->avctx->skip_frame >= AVDISCARD_NONREF
             && ff_hevc_nal_is_nonref(nal->type)))
             continue;
-
+        //解码NALU
         ret = decode_nal_unit(s, nal);
         if (ret < 0) {
             av_log(s->avctx, AV_LOG_WARNING,
@@ -3171,7 +3353,10 @@ static int hevc_decode_frame(AVCodecContext *avctx, void *data, int *got_output,
     uint8_t *new_extradata;
     HEVCContext *s = avctx->priv_data;
 
+    //没有输入码流的时候，输出解码器中剩余数据
+    //对应“Flush Decoder”功能
     if (!avpkt->size) {
+        //第3个参数flush取值为1
         ret = ff_hevc_output_frame(s, data, 1);
         if (ret < 0)
             return ret;
@@ -3189,6 +3374,7 @@ static int hevc_decode_frame(AVCodecContext *avctx, void *data, int *got_output,
     }
 
     s->ref = NULL;
+    //解码一帧数据
     ret    = decode_nal_units(s, avpkt->data, avpkt->size);
     if (ret < 0)
         return ret;
@@ -3448,6 +3634,7 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
     avctx->internal->allocate_progress = 1;
 
     ret = hevc_init_context(avctx);
+    //为HEVCContext中的变量分配内存空间
     if (ret < 0)
         return ret;
 
@@ -3462,6 +3649,7 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
     else
         s->threads_number = 1;
 
+    //如果AVCodecContext中包含extradata，则解码之。
     if (avctx->extradata_size > 0 && avctx->extradata) {
         ret = hevc_decode_extradata(s, avctx->extradata, avctx->extradata_size, 1);
         if (ret < 0) {
