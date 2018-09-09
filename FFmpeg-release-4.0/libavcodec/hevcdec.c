@@ -1413,16 +1413,21 @@ static void luma_mc_uni(HEVCContext *s, uint8_t *dst, ptrdiff_t dststride,
     ptrdiff_t srcstride  = ref->linesize[0];
     int pic_width        = s->ps.sps->width;
     int pic_height       = s->ps.sps->height;
+    //亚像素的运动矢量
+    //mv0，mv1单位是1/4像素
     int mx               = mv->x & 3;
     int my               = mv->y & 3;
     int weight_flag      = (s->sh.slice_type == HEVC_SLICE_P && s->ps.pps->weighted_pred_flag) ||
                            (s->sh.slice_type == HEVC_SLICE_B && s->ps.pps->weighted_bipred_flag);
     int idx              = ff_hevc_pel_weight[block_w];
 
+    //整像素的偏移量
+    //mv0, mv1单位是1/4像素，在这里除以4之后单位变成整像素
     x_off += mv->x >> 2;
     y_off += mv->y >> 2;
     src   += y_off * srcstride + (x_off * (1 << s->ps.sps->pixel_shift));
 
+    //边界处处理
     if (x_off < QPEL_EXTRA_BEFORE || y_off < QPEL_EXTRA_AFTER ||
         x_off >= pic_width - block_w - QPEL_EXTRA_AFTER ||
         y_off >= pic_height - block_h - QPEL_EXTRA_AFTER) {
@@ -1439,11 +1444,12 @@ static void luma_mc_uni(HEVCContext *s, uint8_t *dst, ptrdiff_t dststride,
         src = lc->edge_emu_buffer + buf_offset;
         srcstride = edge_emu_stride;
     }
-
-    if (!weight_flag)
+    //运动补偿
+    if (!weight_flag)//普通的
         s->hevcdsp.put_hevc_qpel_uni[idx][!!my][!!mx](dst, dststride, src, srcstride,
                                                       block_h, mx, my, block_w);
-    else
+        //调用了HEVCDSPContext的put_hevc_qpel_uni()汇编函数完成了运动补偿.
+    else//加权的
         s->hevcdsp.put_hevc_qpel_uni_w[idx][!!my][!!mx](dst, dststride, src, srcstride,
                                                         block_h, s->sh.luma_log2_weight_denom,
                                                         luma_weight, luma_offset, mx, my, block_w);
@@ -1474,21 +1480,30 @@ static void luma_mc_uni(HEVCContext *s, uint8_t *dst, ptrdiff_t dststride,
     ptrdiff_t src1stride  = ref1->linesize[0];
     int pic_width        = s->ps.sps->width;
     int pic_height       = s->ps.sps->height;
+
+    //亚像素的运动矢量
+    //mv0, mv1单位是1/4像素，与11相与之后保留后两位
     int mx0              = mv0->x & 3;
     int my0              = mv0->y & 3;
     int mx1              = mv1->x & 3;
     int my1              = mv1->y & 3;
     int weight_flag      = (s->sh.slice_type == HEVC_SLICE_P && s->ps.pps->weighted_pred_flag) ||
                            (s->sh.slice_type == HEVC_SLICE_B && s->ps.pps->weighted_bipred_flag);
+    //整像素的偏移量
+    //mv0, mv1单位是1/4像素，在这里除以4之后单位变成整像素
     int x_off0           = x_off + (mv0->x >> 2);
     int y_off0           = y_off + (mv0->y >> 2);
     int x_off1           = x_off + (mv1->x >> 2);
     int y_off1           = y_off + (mv1->y >> 2);
     int idx              = ff_hevc_pel_weight[block_w];
 
+    //匹配块数据(整像素精度，没有进行差值)
+    //list0
     uint8_t *src0  = ref0->data[0] + y_off0 * src0stride + (int)((unsigned)x_off0 << s->ps.sps->pixel_shift);
+    //list1
     uint8_t *src1  = ref1->data[0] + y_off1 * src1stride + (int)((unsigned)x_off1 << s->ps.sps->pixel_shift);
 
+    //边界位置的处理
     if (x_off0 < QPEL_EXTRA_BEFORE || y_off0 < QPEL_EXTRA_AFTER ||
         x_off0 >= pic_width - block_w - QPEL_EXTRA_AFTER ||
         y_off0 >= pic_height - block_h - QPEL_EXTRA_AFTER) {
@@ -1523,8 +1538,15 @@ static void luma_mc_uni(HEVCContext *s, uint8_t *dst, ptrdiff_t dststride,
         src1stride = edge_emu_stride;
     }
 
+    //双向预测分成2步:
+    // 1、 使用list0中的匹配块进行单向预测
+    // 2、 使用list1中的匹配块再次进行单向预测，然后与第1次预测的结果求平均
+
+    //第一步
     s->hevcdsp.put_hevc_qpel[idx][!!my0][!!mx0](lc->tmp, src0, src0stride,
                                                 block_h, mx0, my0, block_w);
+    
+    //第二步
     if (!weight_flag)
         s->hevcdsp.put_hevc_qpel_bi[idx][!!my1][!!mx1](dst, dststride, src1, src1stride, lc->tmp,
                                                        block_h, mx1, my1, block_w);
@@ -1536,6 +1558,8 @@ static void luma_mc_uni(HEVCContext *s, uint8_t *dst, ptrdiff_t dststride,
                                                          s->sh.luma_offset_l0[current_mv->ref_idx[0]],
                                                          s->sh.luma_offset_l1[current_mv->ref_idx[1]],
                                                          mx1, my1, block_w);
+
+    //调用了HEVCDSPContext的put_hevc_qpel()和put_hevc_qpel_bi()汇编函数完成了运动补偿.
 
 }
 
@@ -1769,6 +1793,13 @@ static void hevc_luma_mv_mvp_mode(HEVCContext *s, int x0, int y0, int nPbW,
 static void hls_prediction_unit(HEVCContext *s, int x0, int y0,
                                 int nPbW, int nPbH,
                                 int log2_cb_size, int partIdx, int idx)
+/*
+  1、 解析码流得到运动矢量。 HEVC中包含了Merge和AMVP两种运动矢量预测技术。对于使用Merge的码流，调用ff_hevc_luma_mv_merge_mode();对于使用AMVP
+  的码流，调用hevc_luma_mv_mpv_mode()
+  
+  2、 根据运动矢量进行运动补偿。 对于单向预测亮度运动补偿，调用luma_mc_uni(), 对于单向预测色度运动补偿， 调用chroma_mc_uni(); 对于双向预测亮度
+  运动补偿， 调用luma_mc_bi(), 对于单向预测色度运动补偿， 调用chroma_mc_bi()。   
+*/
 {
 #define POS(c_idx, x, y)                                                              \
     &s->frame->data[c_idx][((y) >> s->ps.sps->vshift[c_idx]) * s->frame->linesize[c_idx] + \
@@ -1781,7 +1812,9 @@ static void hls_prediction_unit(HEVCContext *s, int x0, int y0,
 
     MvField *tab_mvf = s->ref->tab_mvf;
     RefPicList  *refPicList = s->ref->refPicList;
+    //参考帧
     HEVCFrame *ref0 = NULL, *ref1 = NULL;
+    //分别指向Y，U，V分量
     uint8_t *dst0 = POS(0, x0, y0);
     uint8_t *dst1 = POS(1, x0, y0);
     uint8_t *dst2 = POS(2, x0, y0);
@@ -1798,6 +1831,7 @@ static void hls_prediction_unit(HEVCContext *s, int x0, int y0,
         lc->pu.merge_flag = ff_hevc_merge_flag_decode(s);
 
     if (skip_flag || lc->pu.merge_flag) {
+        //merge模式
         if (s->sh.max_num_merge_cand > 1)
             merge_idx = ff_hevc_merge_idx_decode(s);
         else
@@ -1806,6 +1840,7 @@ static void hls_prediction_unit(HEVCContext *s, int x0, int y0,
         ff_hevc_luma_mv_merge_mode(s, x0, y0, nPbW, nPbH, log2_cb_size,
                                    partIdx, merge_idx, &current_mv);
     } else {
+        //AMVP模式
         hevc_luma_mv_mvp_mode(s, x0, y0, nPbW, nPbH, log2_cb_size,
                               partIdx, merge_idx, &current_mv);
     }
@@ -1817,12 +1852,15 @@ static void hls_prediction_unit(HEVCContext *s, int x0, int y0,
         for (i = 0; i < nPbW >> s->ps.sps->log2_min_pu_size; i++)
             tab_mvf[(y_pu + j) * min_pu_width + x_pu + i] = current_mv;
 
+    //参考了List0
     if (current_mv.pred_flag & PF_L0) {
         ref0 = refPicList[0].ref[current_mv.ref_idx[0]];
         if (!ref0)
             return;
         hevc_await_progress(s, ref0, &current_mv.mv[0], y0, nPbH);
     }
+
+    //参考了List1
     if (current_mv.pred_flag & PF_L1) {
         ref1 = refPicList[1].ref[current_mv.ref_idx[1]];
         if (!ref1)
@@ -1835,13 +1873,14 @@ static void hls_prediction_unit(HEVCContext *s, int x0, int y0,
         int y0_c = y0 >> s->ps.sps->vshift[1];
         int nPbW_c = nPbW >> s->ps.sps->hshift[1];
         int nPbH_c = nPbH >> s->ps.sps->vshift[1];
-
+        //亮度运动补偿-单向
         luma_mc_uni(s, dst0, s->frame->linesize[0], ref0->frame,
                     &current_mv.mv[0], x0, y0, nPbW, nPbH,
                     s->sh.luma_weight_l0[current_mv.ref_idx[0]],
                     s->sh.luma_offset_l0[current_mv.ref_idx[0]]);
 
         if (s->ps.sps->chroma_format_idc) {
+        //色度运动补偿
             chroma_mc_uni(s, dst1, s->frame->linesize[1], ref0->frame->data[1], ref0->frame->linesize[1],
                           0, x0_c, y0_c, nPbW_c, nPbH_c, &current_mv,
                           s->sh.chroma_weight_l0[current_mv.ref_idx[0]][0], s->sh.chroma_offset_l0[current_mv.ref_idx[0]][0]);
@@ -1875,6 +1914,7 @@ static void hls_prediction_unit(HEVCContext *s, int x0, int y0,
         int nPbW_c = nPbW >> s->ps.sps->hshift[1];
         int nPbH_c = nPbH >> s->ps.sps->vshift[1];
 
+        //亮度运动补偿 - 双向
         luma_mc_bi(s, dst0, s->frame->linesize[0], ref0->frame,
                    &current_mv.mv[0], x0, y0, nPbW, nPbH,
                    ref1->frame, &current_mv.mv[1], &current_mv);

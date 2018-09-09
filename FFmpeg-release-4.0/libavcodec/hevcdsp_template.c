@@ -678,15 +678,37 @@ static void FUNC(put_hevc_qpel_hv)(int16_t *dst,
     }
 }
 
+//单向预测水平像素插值函数
 static void FUNC(put_hevc_qpel_uni_h)(uint8_t *_dst,  ptrdiff_t _dststride,
                                       uint8_t *_src, ptrdiff_t _srcstride,
                                       int height, intptr_t mx, intptr_t my, int width)
+/*
+
+    单向预测
+    水平 (Horrzontal) 滤波像素插值
+
+    A   B   C   D X E   F   G   H
+
+    参数：
+    _dst: 输出的插值后像素
+    _dststride: 输出一行像素数据的大小
+    _src: 输入的整像素
+    _srcstride: 输入一行像素数据的大小
+    height: 像素的高
+    weight: 像素的宽
+    mx: 运动矢量亚像素x方向取值。 以1/4像素为基本单位
+    my: 运动矢量亚像素y方向取值。 以1/4像素为基本单位
+  
+
+*/
 {
     int x, y;
-    pixel        *src       = (pixel*)_src;
+    pixel        *src       = (pixel*)_src;    //#define pixel  uint8_t
     ptrdiff_t     srcstride = _srcstride / sizeof(pixel);
     pixel *dst          = (pixel *)_dst;
     ptrdiff_t dststride = _dststride / sizeof(pixel);
+    //ff_hevc_qpel_filters[]是滤波器插值系数数组
+    //[0]为1/4像素点插值; [1]为半像素点插值; [2]为3/4像素点插值
     const int8_t *filter    = ff_hevc_qpel_filters[mx - 1];
     int shift = 14 - BIT_DEPTH;
 
@@ -696,6 +718,10 @@ static void FUNC(put_hevc_qpel_uni_h)(uint8_t *_dst,  ptrdiff_t _dststride,
     int offset = 0;
 #endif
 
+    //处理x*y个像素
+        //注意，调用了QPEL_FILTER()，其中使用filter[]中的系数进行滤波。
+    //QPEL_FILTER()的参数是(src,1)
+    //其中第2个参数stride代表用于滤波的点之间的间距，取1的话是水平滤波，取srcstride的话是垂直滤波
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++)
             dst[x] = av_clip_pixel(((QPEL_FILTER(src, 1) >> (BIT_DEPTH - 8)) + offset) >> shift);
@@ -707,6 +733,8 @@ static void FUNC(put_hevc_qpel_uni_h)(uint8_t *_dst,  ptrdiff_t _dststride,
 static void FUNC(put_hevc_qpel_bi_h)(uint8_t *_dst, ptrdiff_t _dststride, uint8_t *_src, ptrdiff_t _srcstride,
                                      int16_t *src2,
                                      int height, intptr_t mx, intptr_t my, int width)
+
+// src2: 需要叠加的像素，该像素与滤波后的像素叠加后求平均
 {
     int x, y;
     pixel        *src       = (pixel*)_src;
@@ -716,6 +744,7 @@ static void FUNC(put_hevc_qpel_bi_h)(uint8_t *_dst, ptrdiff_t _dststride, uint8_
 
     const int8_t *filter    = ff_hevc_qpel_filters[mx - 1];
 
+    //注意和单向预测相比多了“+1”，即在后面代码中多右移一位，实现了“除以2”功能
     int shift = 14  + 1 - BIT_DEPTH;
 #if BIT_DEPTH < 14
     int offset = 1 << (shift - 1);
@@ -723,6 +752,9 @@ static void FUNC(put_hevc_qpel_bi_h)(uint8_t *_dst, ptrdiff_t _dststride, uint8_
     int offset = 0;
 #endif
 
+    //处理x*y个像素
+    //注意，在这里使用QPEL_FILTER[]插值后的像素叠加了src2[]然后求平均
+    //这里求平均是通过把shift变量加1实现的(等同于除以2)
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++)
             dst[x] = av_clip_pixel(((QPEL_FILTER(src, 1) >> (BIT_DEPTH - 8)) + src2[x] + offset) >> shift);
